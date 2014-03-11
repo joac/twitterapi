@@ -1,20 +1,31 @@
-package main
+package twitterapi
 
 import (
+    "bufio"
     "encoding/json"
-    "fmt"
     "github.com/garyburd/go-oauth/oauth"
     "io"
-    "io/ioutil"
-    "log"
     "net/http"
     "net/url"
-    "os"
+    "strconv"
 )
 
 type AccessCredentialSetting struct {
     Api, Access *oauth.Credentials
 }
+
+type User struct {
+    Screen_name string
+}
+
+type Tweet struct {
+    Text string
+    User User
+}
+
+const (
+    StatusStreamUrl = "https://stream.twitter.com/1.1/statuses/filter.json"
+)
 
 var (
     oauthClient = oauth.Client{
@@ -23,38 +34,67 @@ var (
         TokenRequestURI:               "https://api.twitter.com/oauth/access_token",
     }
     accessCredential = oauth.Credentials{}
-    setting          = AccessCredentialSetting{
+    Setting          = AccessCredentialSetting{
         Api:    &oauthClient.Credentials,
         Access: &accessCredential,
     }
 )
 
-func readCredentials() error {
-    b, err := ioutil.ReadFile("tokens.json")
+func PostValues(terms string) (form url.Values) {
+    form = url.Values{}
+    form.Add("track", terms)
+    form.Add("delimited", "length")
+    return form
+}
+
+func Listen(terms string, outChannel chan *Tweet) (err error) {
+    v := PostValues(terms)
+    resp, err := oauthClient.Post(http.DefaultClient, &accessCredential,
+        StatusStreamUrl, v)
     if err != nil {
         return err
     }
-    return json.Unmarshal(b, &setting)
+    defer resp.Body.Close()
+    err = parseBody(resp.Body, outChannel)
+    if err != nil {
+        return err
+    }
+    return nil
 }
 
-func main() {
-    if err := readCredentials(); err != nil {
-        log.Fatal(err)
+func parseBody(body io.Reader, outChannel chan *Tweet) (err error) {
+    var (
+        dataLength uint64
+        tweet      Tweet
+    )
+    bufReader := bufio.NewReader(body)
+    for {
+        dataLength, err = ReadBlobLength(bufReader)
+        if err != nil {
+            return err
+        }
+        tweetBlob := make([]byte, dataLength)
+        _, err = bufReader.Read(tweetBlob)
+        if err != nil {
+            return err
+        }
+        json.Unmarshal(tweetBlob, &tweet)
+        outChannel <- &tweet
     }
-    fmt.Println(setting.Api.Token)
-    fmt.Println(setting.Access.Token)
-    fmt.Println(accessCredential.Token)
-    v := url.Values{}
-    v.Add("track", "go, golang")
-    resp, err := oauthClient.Post(http.DefaultClient, &accessCredential,
-        "https://stream.twitter.com/1.1/statuses/filter.json", v)
+}
 
-    if err != nil {
-        log.Fatal(err)
+func ReadBlobLength(r *bufio.Reader) (length uint64, err error) {
+    for {
+        blob, _, err := r.ReadLine()
+        if err != nil {
+            return 0, err
+        }
+        if len(blob) > 0 {
+            length, err = strconv.ParseUint(string(blob), 10, 32)
+            if err != nil {
+                return 0, err
+            }
+            return length, nil
+        }
     }
-    defer resp.Body.Close()
-    if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println("Hello World")
 }
